@@ -277,6 +277,32 @@ int OnCalculate(const int rates_total,
    if(rates_total < Lookback + 10)
       return(0);
 
+   //--- Wait for indicator data to be ready before first calculation
+   //--- Without this, historical bars get calculated with missing MTF data
+   //--- and are never recalculated (prev_calculated stays > 0)
+   if(UseTrendFilter)
+   {
+      double testBuf[];
+      if(emaHandle != INVALID_HANDLE)
+      {
+         if(CopyBuffer(emaHandle, 0, 0, 1, testBuf) < 1)
+            return(0);
+      }
+      if(UseMTFTrend)
+      {
+         if(CopyBuffer(emaHandle_TF1, 0, 0, 1, testBuf) < 1 ||
+            CopyBuffer(emaHandle_TF2, 0, 0, 1, testBuf) < 1 ||
+            CopyBuffer(emaHandle_TF3, 0, 0, 1, testBuf) < 1)
+            return(0);
+      }
+   }
+   if(UseVolatilityFilter && atrHandle != INVALID_HANDLE)
+   {
+      double testBuf[];
+      if(CopyBuffer(atrHandle, 0, 0, 1, testBuf) < 1)
+         return(0);
+   }
+
    ArraySetAsSeries(open, true);
    ArraySetAsSeries(high, true);
    ArraySetAsSeries(low, true);
@@ -351,8 +377,8 @@ void CheckSignal(int i, const double &open[], const double &high[],
    double candleBody = MathAbs(close[i] - open[i]);
    double bodyRatio = candleBody / candleRange;
 
-   //--- Fix #6: Enforce MinCandleBodyRatio as a hard filter
-   if(bodyRatio < MinCandleBodyRatio)
+   //--- Enforce MinCandleBodyRatio as a hard filter (set to 0 to disable)
+   if(MinCandleBodyRatio > 0 && bodyRatio < MinCandleBodyRatio)
       return;
 
    double closeFromLow = close[i] - low[i];
@@ -626,9 +652,17 @@ string CheckAllFilters(string signalType, double signalClose, datetime signalTim
    {
       int bullCount = 0, bearCount = 0;
       GetMTFTrendAtTime(signalTime, bullCount, bearCount);
-      int alignedCount = (signalType == "BUY") ? bullCount : bearCount;
-      if(alignedCount < MinTFAlignment)
-         return "MTF_" + IntegerToString(alignedCount) + "/3";
+      int resolvedCount = bullCount + bearCount;
+
+      //--- Only apply MTF filter when at least one TF has data for this bar.
+      //--- For older historical bars the higher-TF data may not reach back far
+      //--- enough; blocking those signals would leave the chart empty.
+      if(resolvedCount > 0)
+      {
+         int alignedCount = (signalType == "BUY") ? bullCount : bearCount;
+         if(alignedCount < MinTFAlignment)
+            return "MTF_" + IntegerToString(alignedCount) + "/" + IntegerToString(resolvedCount);
+      }
    }
 
    //--- Current TF Trend Filter
