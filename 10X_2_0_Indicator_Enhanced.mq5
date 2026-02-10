@@ -44,7 +44,7 @@ input group "══════ Signal Settings ══════"
 input int      Lookback = 5;                    // Lookback Period
 input bool     RequireLowestHighest = false;    // Require LOWEST low / HIGHEST high
 input double   MinCandleBodyRatio = 0.3;        // Min body/range ratio
-input int      SignalExpiryBars = 3;            // Signal expires after X bars (0=no expiry)
+input int      SignalExpiryBars = 3;            // Entry Zone Width in bars (0=default 5)
 
 input group "══════ Display Settings ══════"
 input bool     ShowFilteredSignals = true;      // Show Filtered Signals (smaller arrows)
@@ -122,80 +122,120 @@ string spreadUnit = "pips";
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   //--- Validate inputs (Fix #10)
+   if(Lookback < 1)
+   {
+      Print("Error: Lookback Period must be >= 1");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+   if(TrendEMA_Period < 1)
+   {
+      Print("Error: EMA Period must be >= 1");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+   if(UseVolatilityFilter && ATR_Period < 1)
+   {
+      Print("Error: ATR Period must be >= 1");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+   if(RiskRewardRatio <= 0)
+   {
+      Print("Error: Risk:Reward Ratio must be > 0");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+   if(MinTFAlignment < 0 || MinTFAlignment > 3)
+   {
+      Print("Error: Min TF Alignment must be between 0 and 3");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+   if(MinSignalScore > 100)
+      Print("Warning: Min Signal Score > 100, no signals will pass");
+   if(UseTimeFilter && TradingStartHour >= TradingEndHour)
+      Print("Warning: Start Hour >= End Hour, time filter may not work for overnight sessions");
+
    //--- Set indicator buffers
    SetIndexBuffer(0, BuySignalBuffer, INDICATOR_DATA);
    SetIndexBuffer(1, SellSignalBuffer, INDICATOR_DATA);
    SetIndexBuffer(2, FilteredBuyBuffer, INDICATOR_DATA);
    SetIndexBuffer(3, FilteredSellBuffer, INDICATOR_DATA);
-   
+
    //--- Set arrow codes - using cleaner wingdings
    PlotIndexSetInteger(0, PLOT_ARROW, 233);  // Up arrow
    PlotIndexSetInteger(1, PLOT_ARROW, 234);  // Down arrow
    PlotIndexSetInteger(2, PLOT_ARROW, 158);  // Small circle for filtered
    PlotIndexSetInteger(3, PLOT_ARROW, 158);  // Small circle for filtered
-   
+
    //--- Set colors
    PlotIndexSetInteger(0, PLOT_LINE_COLOR, BuyColor);
    PlotIndexSetInteger(1, PLOT_LINE_COLOR, SellColor);
    PlotIndexSetInteger(2, PLOT_LINE_COLOR, FilteredBuyColor);
    PlotIndexSetInteger(3, PLOT_LINE_COLOR, FilteredSellColor);
-   
+
    //--- Set empty values
    PlotIndexSetDouble(0, PLOT_EMPTY_VALUE, EMPTY_VALUE);
    PlotIndexSetDouble(1, PLOT_EMPTY_VALUE, EMPTY_VALUE);
    PlotIndexSetDouble(2, PLOT_EMPTY_VALUE, EMPTY_VALUE);
    PlotIndexSetDouble(3, PLOT_EMPTY_VALUE, EMPTY_VALUE);
-   
+
    //--- Create indicator handles
    if(UseTrendFilter)
    {
       emaHandle = iMA(_Symbol, _Period, TrendEMA_Period, 0, MODE_EMA, TrendEMA_Price);
       if(emaHandle == INVALID_HANDLE)
       {
-         Print("❌ Failed to create EMA indicator");
+         Print("Failed to create EMA indicator");
          return(INIT_FAILED);
       }
-      
+
       if(UseMTFTrend)
       {
+         //--- Validate MTF timeframes are higher than chart timeframe (Fix #8)
+         int currentPeriodSec = PeriodSeconds(_Period);
+         if(PeriodSeconds(MTF_TF1) <= currentPeriodSec ||
+            PeriodSeconds(MTF_TF2) <= currentPeriodSec ||
+            PeriodSeconds(MTF_TF3) <= currentPeriodSec)
+         {
+            Print("Warning: MTF timeframes should be higher than chart timeframe (", GetTimeframeName(_Period), ")");
+         }
+
          emaHandle_TF1 = iMA(_Symbol, MTF_TF1, TrendEMA_Period, 0, MODE_EMA, TrendEMA_Price);
          emaHandle_TF2 = iMA(_Symbol, MTF_TF2, TrendEMA_Period, 0, MODE_EMA, TrendEMA_Price);
          emaHandle_TF3 = iMA(_Symbol, MTF_TF3, TrendEMA_Period, 0, MODE_EMA, TrendEMA_Price);
-         
+
          if(emaHandle_TF1 == INVALID_HANDLE || emaHandle_TF2 == INVALID_HANDLE || emaHandle_TF3 == INVALID_HANDLE)
          {
-            Print("❌ Failed to create MTF EMA indicators");
+            Print("Failed to create MTF EMA indicators");
             return(INIT_FAILED);
          }
       }
    }
-   
+
    if(UseVolatilityFilter)
    {
       atrHandle = iATR(_Symbol, _Period, ATR_Period);
       if(atrHandle == INVALID_HANDLE)
       {
-         Print("❌ Failed to create ATR indicator");
+         Print("Failed to create ATR indicator");
          return(INIT_FAILED);
       }
    }
-   
+
    //--- Detect instrument type
    DetectInstrumentType();
-   
+
    //--- Create stats panel
    if(ShowStatsPanel)
       CreateStatsPanel();
-   
+
    //--- Set indicator name
    IndicatorSetString(INDICATOR_SHORTNAME, "10X 2.0 Enhanced");
-   
-   Print("═══════════════════════════════════════════════");
-   Print("✅ 10X 2.0 Enhanced Indicator v2.0");
+
+   Print("===================================================");
+   Print("10X 2.0 Enhanced Indicator v2.0");
    Print("   MTF: ", GetTimeframeName(MTF_TF1), "/", GetTimeframeName(MTF_TF2), "/", GetTimeframeName(MTF_TF3));
    Print("   Min Alignment: ", MinTFAlignment, "/3");
-   Print("═══════════════════════════════════════════════");
-   
+   Print("===================================================");
+
    return(INIT_SUCCEEDED);
 }
 
@@ -209,15 +249,15 @@ void OnDeinit(const int reason)
    if(emaHandle_TF1 != INVALID_HANDLE) IndicatorRelease(emaHandle_TF1);
    if(emaHandle_TF2 != INVALID_HANDLE) IndicatorRelease(emaHandle_TF2);
    if(emaHandle_TF3 != INVALID_HANDLE) IndicatorRelease(emaHandle_TF3);
-   
+
    ObjectsDeleteAll(0, objPrefix);
-   
-   Print("═══════════════════════════════════════════════");
+
+   Print("===================================================");
    Print("10X 2.0 Final Statistics:");
    Print("   Valid BUY:  ", validBuySignals);
    Print("   Valid SELL: ", validSellSignals);
    Print("   Filtered:   ", filteredSignals);
-   Print("═══════════════════════════════════════════════");
+   Print("===================================================");
 }
 
 //+------------------------------------------------------------------+
@@ -236,7 +276,7 @@ int OnCalculate(const int rates_total,
 {
    if(rates_total < Lookback + 10)
       return(0);
-   
+
    ArraySetAsSeries(open, true);
    ArraySetAsSeries(high, true);
    ArraySetAsSeries(low, true);
@@ -246,69 +286,83 @@ int OnCalculate(const int rates_total,
    ArraySetAsSeries(SellSignalBuffer, true);
    ArraySetAsSeries(FilteredBuyBuffer, true);
    ArraySetAsSeries(FilteredSellBuffer, true);
-   
+
    int limit;
    if(prev_calculated == 0)
    {
       limit = (MaxBarsToCalculate > 0) ? MathMin(MaxBarsToCalculate, rates_total - Lookback - 2) : rates_total - Lookback - 2;
-      
+
       ArrayInitialize(BuySignalBuffer, EMPTY_VALUE);
       ArrayInitialize(SellSignalBuffer, EMPTY_VALUE);
       ArrayInitialize(FilteredBuyBuffer, EMPTY_VALUE);
       ArrayInitialize(FilteredSellBuffer, EMPTY_VALUE);
-      
-      totalSignals = 0;
-      filteredSignals = 0;
-      validBuySignals = 0;
-      validSellSignals = 0;
-      
+
       ObjectsDeleteAll(0, objPrefix + "zone_");
       ObjectsDeleteAll(0, objPrefix + "lbl_");
+      ObjectsDeleteAll(0, objPrefix + "flt_");  // Fix #2: clean up filter labels too
    }
    else
    {
       limit = rates_total - prev_calculated + 1;
    }
-   
+
    for(int i = limit; i >= 1; i--)
    {
       if(i + Lookback >= rates_total)
          continue;
-      
+
       CheckSignal(i, open, high, low, close, time);
    }
-   
+
+   //--- Fix #1: Recount signals from buffers to avoid accumulation on tick updates
+   totalSignals = 0;
+   filteredSignals = 0;
+   validBuySignals = 0;
+   validSellSignals = 0;
+   int countLimit = (MaxBarsToCalculate > 0) ? MathMin(MaxBarsToCalculate, rates_total - Lookback - 2) : rates_total - Lookback - 2;
+   for(int c = 1; c <= countLimit; c++)
+   {
+      if(BuySignalBuffer[c] != EMPTY_VALUE) { validBuySignals++; totalSignals++; }
+      if(SellSignalBuffer[c] != EMPTY_VALUE) { validSellSignals++; totalSignals++; }
+      if(FilteredBuyBuffer[c] != EMPTY_VALUE) { filteredSignals++; totalSignals++; }
+      if(FilteredSellBuffer[c] != EMPTY_VALUE) { filteredSignals++; totalSignals++; }
+   }
+
    //--- Update stats panel
    if(ShowStatsPanel)
       UpdateStatsPanel();
-   
+
    return(rates_total);
 }
 
 //+------------------------------------------------------------------+
 //| Check for signal at bar index                                     |
 //+------------------------------------------------------------------+
-void CheckSignal(int i, const double &open[], const double &high[], 
+void CheckSignal(int i, const double &open[], const double &high[],
                  const double &low[], const double &close[], const datetime &time[])
 {
    bool isBullish = close[i] > open[i];
    bool isBearish = close[i] < open[i];
-   
+
    double candleRange = high[i] - low[i];
    if(candleRange <= 0)
       return;
-   
+
    double candleBody = MathAbs(close[i] - open[i]);
    double bodyRatio = candleBody / candleRange;
-   
+
+   //--- Fix #6: Enforce MinCandleBodyRatio as a hard filter
+   if(bodyRatio < MinCandleBodyRatio)
+      return;
+
    double closeFromLow = close[i] - low[i];
    double closeFromHigh = high[i] - close[i];
    bool upperQuarterClose = closeFromLow >= (0.75 * candleRange);
    bool lowerQuarterClose = closeFromHigh >= (0.75 * candleRange);
-   
+
    bool makingLowerLow = false;
    bool makingHigherHigh = false;
-   
+
    if(RequireLowestHighest)
    {
       makingLowerLow = true;
@@ -330,64 +384,59 @@ void CheckSignal(int i, const double &open[], const double &high[],
          if(high[i] > high[i + j]) { makingHigherHigh = true; break; }
       }
    }
-   
+
    //--- BUY SIGNAL
    if(isBullish && makingLowerLow && upperQuarterClose)
    {
-      totalSignals++;
+      // Fix #1: counters removed, recount from buffers in OnCalculate
       int score = CalculateSignalScore("BUY", i, open, high, low, close, bodyRatio, time[i]);
       string filterResult = CheckAllFilters("BUY", close[i], time[i]);
-      
+
       if(filterResult == "PASS" && score >= MinSignalScore)
       {
-         validBuySignals++;
          BuySignalBuffer[i] = low[i] - (candleRange * 0.5);
-         
+
          if(ShowEntryZones)
             DrawEntryZone(i, "BUY", high[i], low[i], time[i], score);
-         
+
          if(ShowScoreLabels)
             CreateScoreLabel(i, "BUY", score, time[i], low[i] - (candleRange * 0.8));
       }
       else
       {
-         filteredSignals++;
          if(ShowFilteredSignals)
          {
             FilteredBuyBuffer[i] = low[i] - (candleRange * 0.3);
-            
+
             // Show filter reason label
             if(ShowFilterReasons)
                CreateFilterLabel(i, "BUY", filterResult, score, time[i], low[i] - (candleRange * 0.6));
          }
       }
    }
-   
+
    //--- SELL SIGNAL
    if(isBearish && makingHigherHigh && lowerQuarterClose)
    {
-      totalSignals++;
       int score = CalculateSignalScore("SELL", i, open, high, low, close, bodyRatio, time[i]);
       string filterResult = CheckAllFilters("SELL", close[i], time[i]);
-      
+
       if(filterResult == "PASS" && score >= MinSignalScore)
       {
-         validSellSignals++;
          SellSignalBuffer[i] = high[i] + (candleRange * 0.5);
-         
+
          if(ShowEntryZones)
             DrawEntryZone(i, "SELL", high[i], low[i], time[i], score);
-         
+
          if(ShowScoreLabels)
             CreateScoreLabel(i, "SELL", score, time[i], high[i] + (candleRange * 0.8));
       }
       else
       {
-         filteredSignals++;
          if(ShowFilteredSignals)
          {
             FilteredSellBuffer[i] = high[i] + (candleRange * 0.3);
-            
+
             // Show filter reason label
             if(ShowFilterReasons)
                CreateFilterLabel(i, "SELL", filterResult, score, time[i], high[i] + (candleRange * 0.6));
@@ -399,13 +448,13 @@ void CheckSignal(int i, const double &open[], const double &high[],
 //+------------------------------------------------------------------+
 //| Draw entry zone box                                               |
 //+------------------------------------------------------------------+
-void DrawEntryZone(int barIndex, string signalType, double signalHigh, 
+void DrawEntryZone(int barIndex, string signalType, double signalHigh,
                    double signalLow, datetime signalTime, int score)
 {
    double buffer = SignalBufferPips * pipValue;
    double entryPrice = (signalHigh + signalLow) / 2.0;
    double stopLoss, takeProfit, riskPoints;
-   
+
    if(signalType == "BUY")
    {
       stopLoss = signalLow - buffer;
@@ -418,36 +467,37 @@ void DrawEntryZone(int barIndex, string signalType, double signalHigh,
       riskPoints = stopLoss - entryPrice;
       takeProfit = entryPrice - (riskPoints * RiskRewardRatio);
    }
-   
-   //--- Zone extends for SignalExpiryBars (or 5 if no expiry set)
+
+   //--- Zone extends for SignalExpiryBars (or 5 if no width set)
    int zoneBars = (SignalExpiryBars > 0) ? SignalExpiryBars : 5;
    datetime endTime = signalTime + PeriodSeconds() * zoneBars;
-   color zoneColor = (signalType == "BUY") ? BuyZoneColor : SellZoneColor;
-   
+   color zoneColor = (signalType == "BUY") ? BuyZoneColor : SellZoneColor;  // Fix #4: use input colors
+
    //--- Draw TP zone (translucent)
-   string tpName = objPrefix + "zone_tp_" + IntegerToString(signalTime);
+   // Fix #12: include signalType in object names to avoid collision
+   string tpName = objPrefix + "zone_tp_" + signalType + "_" + IntegerToString(signalTime);
    double tpTop = (signalType == "BUY") ? takeProfit : entryPrice;
    double tpBot = (signalType == "BUY") ? entryPrice : takeProfit;
-   
+
    ObjectCreate(0, tpName, OBJ_RECTANGLE, 0, signalTime, tpTop, endTime, tpBot);
-   ObjectSetInteger(0, tpName, OBJPROP_COLOR, (signalType == "BUY") ? C'0,60,0' : C'60,0,0');
+   ObjectSetInteger(0, tpName, OBJPROP_COLOR, zoneColor);  // Fix #4: use zoneColor
    ObjectSetInteger(0, tpName, OBJPROP_FILL, true);
    ObjectSetInteger(0, tpName, OBJPROP_BACK, true);
    ObjectSetInteger(0, tpName, OBJPROP_SELECTABLE, false);
-   
+
    //--- Draw SL zone
-   string slName = objPrefix + "zone_sl_" + IntegerToString(signalTime);
+   string slName = objPrefix + "zone_sl_" + signalType + "_" + IntegerToString(signalTime);
    double slTop = (signalType == "BUY") ? entryPrice : stopLoss;
    double slBot = (signalType == "BUY") ? stopLoss : entryPrice;
-   
+
    ObjectCreate(0, slName, OBJ_RECTANGLE, 0, signalTime, slTop, endTime, slBot);
    ObjectSetInteger(0, slName, OBJPROP_COLOR, C'60,30,0');
    ObjectSetInteger(0, slName, OBJPROP_FILL, true);
    ObjectSetInteger(0, slName, OBJPROP_BACK, true);
    ObjectSetInteger(0, slName, OBJPROP_SELECTABLE, false);
-   
+
    //--- Entry line
-   string entryName = objPrefix + "zone_entry_" + IntegerToString(signalTime);
+   string entryName = objPrefix + "zone_entry_" + signalType + "_" + IntegerToString(signalTime);
    ObjectCreate(0, entryName, OBJ_TREND, 0, signalTime, entryPrice, endTime, entryPrice);
    ObjectSetInteger(0, entryName, OBJPROP_COLOR, clrWhite);
    ObjectSetInteger(0, entryName, OBJPROP_STYLE, STYLE_DOT);
@@ -459,13 +509,14 @@ void DrawEntryZone(int barIndex, string signalType, double signalHigh,
 //+------------------------------------------------------------------+
 //| Create score label (only if enabled)                              |
 //+------------------------------------------------------------------+
-void CreateScoreLabel(int barIndex, string signalType, int score, 
+void CreateScoreLabel(int barIndex, string signalType, int score,
                       datetime signalTime, double price)
 {
-   string name = objPrefix + "lbl_" + IntegerToString(signalTime);
+   // Fix #12: include signalType in object name
+   string name = objPrefix + "lbl_" + signalType + "_" + IntegerToString(signalTime);
    string text = IntegerToString(score);
    color textColor = (signalType == "BUY") ? BuyColor : SellColor;
-   
+
    ObjectCreate(0, name, OBJ_TEXT, 0, signalTime, price);
    ObjectSetString(0, name, OBJPROP_TEXT, text);
    ObjectSetInteger(0, name, OBJPROP_COLOR, textColor);
@@ -477,13 +528,13 @@ void CreateScoreLabel(int barIndex, string signalType, int score,
 //+------------------------------------------------------------------+
 //| Create filter reason label (for filtered signals)                 |
 //+------------------------------------------------------------------+
-void CreateFilterLabel(int barIndex, string signalType, string filterReason, 
+void CreateFilterLabel(int barIndex, string signalType, string filterReason,
                        int score, datetime signalTime, double price)
 {
    string name = objPrefix + "flt_" + IntegerToString(signalTime) + "_" + signalType;
    string text = IntegerToString(score) + " [" + filterReason + "]";
    color textColor = (signalType == "BUY") ? FilteredBuyColor : FilteredSellColor;
-   
+
    ObjectCreate(0, name, OBJ_TEXT, 0, signalTime, price);
    ObjectSetString(0, name, OBJPROP_TEXT, text);
    ObjectSetInteger(0, name, OBJPROP_COLOR, textColor);
@@ -495,17 +546,16 @@ void CreateFilterLabel(int barIndex, string signalType, string filterReason,
 //+------------------------------------------------------------------+
 //| Calculate signal score                                            |
 //+------------------------------------------------------------------+
-int CalculateSignalScore(string signalType, int barIndex, 
-                         const double &open[], const double &high[], 
+int CalculateSignalScore(string signalType, int barIndex,
+                         const double &open[], const double &high[],
                          const double &low[], const double &close[],
                          double bodyRatio, datetime signalTime)
 {
    int score = 50;
-   
+
    if(bodyRatio >= 0.6) score += 15;
    else if(bodyRatio >= MinCandleBodyRatio) score += 10;
-   else if(bodyRatio < MinCandleBodyRatio) score -= 15;
-   
+
    double range = high[barIndex] - low[barIndex];
    if(signalType == "BUY")
    {
@@ -519,7 +569,7 @@ int CalculateSignalScore(string signalType, int barIndex,
       if(closeRatio >= 0.9) score += 15;
       else if(closeRatio >= 0.8) score += 10;
    }
-   
+
    if(UseTrendFilter && UseMTFTrend)
    {
       int bullCount = 0, bearCount = 0;
@@ -528,7 +578,7 @@ int CalculateSignalScore(string signalType, int barIndex,
       if(alignedCount == 3) score += 20;
       else if(alignedCount == 2) score += 10;
    }
-   
+
    return MathMin(100, MathMax(0, score));
 }
 
@@ -545,22 +595,23 @@ string CheckAllFilters(string signalType, double signalClose, datetime signalTim
       if(dt.hour < TradingStartHour || dt.hour >= TradingEndHour)
          return "TIME";
    }
-   
+
    //--- Volatility Filter
    if(UseVolatilityFilter && atrHandle != INVALID_HANDLE)
    {
       int barShift = iBarShift(_Symbol, _Period, signalTime);
-      
+
       double atrValues[];
       ArraySetAsSeries(atrValues, true);
       if(CopyBuffer(atrHandle, 0, barShift, ATR_Average_Period + 5, atrValues) > ATR_Average_Period)
       {
          double currentATR = atrValues[0];
+         //--- Fix #7: exclude current bar from its own average
          double avgATR = 0;
-         for(int j = 0; j < ATR_Average_Period; j++)
+         for(int j = 1; j <= ATR_Average_Period; j++)
             avgATR += atrValues[j];
          avgATR /= ATR_Average_Period;
-         
+
          if(avgATR > 0)
          {
             double ratio = currentATR / avgATR;
@@ -569,7 +620,7 @@ string CheckAllFilters(string signalType, double signalClose, datetime signalTim
          }
       }
    }
-   
+
    //--- MTF Trend Filter
    if(UseTrendFilter && UseMTFTrend)
    {
@@ -579,12 +630,12 @@ string CheckAllFilters(string signalType, double signalClose, datetime signalTim
       if(alignedCount < MinTFAlignment)
          return "MTF_" + IntegerToString(alignedCount) + "/3";
    }
-   
+
    //--- Current TF Trend Filter
    if(UseTrendFilter && RequireCurrentTFAlign && emaHandle != INVALID_HANDLE)
    {
       int barShift = iBarShift(_Symbol, _Period, signalTime);
-      
+
       double emaValues[];
       ArraySetAsSeries(emaValues, true);
       if(CopyBuffer(emaHandle, 0, barShift, 3, emaValues) >= 2)
@@ -594,7 +645,7 @@ string CheckAllFilters(string signalType, double signalClose, datetime signalTim
          if(signalType == "SELL" && bullish) return "TREND";
       }
    }
-   
+
    return "PASS";
 }
 
@@ -605,17 +656,17 @@ void GetMTFTrendAtTime(datetime signalTime, int &bullCount, int &bearCount)
 {
    bullCount = 0;
    bearCount = 0;
-   
+
    string trend1 = GetTrendDirectionAtTime(emaHandle_TF1, MTF_TF1, signalTime);
    string trend2 = GetTrendDirectionAtTime(emaHandle_TF2, MTF_TF2, signalTime);
    string trend3 = GetTrendDirectionAtTime(emaHandle_TF3, MTF_TF3, signalTime);
-   
+
    if(trend1 == "BULL") bullCount++;
    else if(trend1 == "BEAR") bearCount++;
-   
+
    if(trend2 == "BULL") bullCount++;
    else if(trend2 == "BEAR") bearCount++;
-   
+
    if(trend3 == "BULL") bullCount++;
    else if(trend3 == "BEAR") bearCount++;
 }
@@ -627,23 +678,27 @@ string GetTrendDirectionAtTime(int handle, ENUM_TIMEFRAMES tf, datetime signalTi
 {
    if(handle == INVALID_HANDLE)
       return "N/A";
-   
+
    // Find the bar index on the higher timeframe that corresponds to signalTime
    int barShift = iBarShift(_Symbol, tf, signalTime);
-   if(barShift < 0) 
+   if(barShift < 0)
       return "N/A";
-   
+
+   //--- Fix #9: use completed bar to avoid look-ahead bias on forming HTF bar
+   if(barShift == 0)
+      barShift = 1;
+
    double emaValues[];
    ArraySetAsSeries(emaValues, true);
-   
+
    if(CopyBuffer(handle, 0, barShift, 3, emaValues) < 2)
       return "N/A";
-   
+
    // Get close price at that time on the higher timeframe
    double closePrice = iClose(_Symbol, tf, barShift);
    if(closePrice <= 0 || emaValues[0] <= 0)
       return "N/A";
-   
+
    if(closePrice > emaValues[0])
       return "BULL";
    else if(closePrice < emaValues[0])
@@ -664,7 +719,7 @@ void CreateStatsPanel()
    int lineHeight = 22;
    int labelX = xOffset + 15;
    int valueX = xOffset + 120;
-   
+
    //--- Background
    string bgName = objPrefix + "panel_bg";
    ObjectCreate(0, bgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
@@ -676,49 +731,49 @@ void CreateStatsPanel()
    ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, PanelBgColor);
    ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
    ObjectSetInteger(0, bgName, OBJPROP_BORDER_COLOR, C'60,60,80');
-   
+
    int y = yOffset + 15;
-   
+
    //--- Title
    CreatePanelLabel("title", "10X 2.0 SIGNALS", labelX, y, clrGold, 11);
    y += lineHeight + 10;
-   
+
    //--- Signal Stats Section Header
-   CreatePanelLabel("stats_hdr", "── SIGNALS ──", labelX, y, C'100,100,120', 9);
+   CreatePanelLabel("stats_hdr", "-- SIGNALS --", labelX, y, C'100,100,120', 9);
    y += lineHeight;
-   
+
    CreatePanelLabel("buy_lbl", "Valid BUY:", labelX, y, C'140,140,140', 9);
    CreatePanelLabel("buy_val", "0", valueX, y, BuyColor, 9);
    y += lineHeight;
-   
+
    CreatePanelLabel("sell_lbl", "Valid SELL:", labelX, y, C'140,140,140', 9);
    CreatePanelLabel("sell_val", "0", valueX, y, SellColor, 9);
    y += lineHeight;
-   
+
    CreatePanelLabel("filt_lbl", "Filtered:", labelX, y, C'140,140,140', 9);
    CreatePanelLabel("filt_val", "0", valueX, y, clrOrange, 9);
    y += lineHeight;
-   
+
    CreatePanelLabel("rate_lbl", "Pass Rate:", labelX, y, C'140,140,140', 9);
    CreatePanelLabel("rate_val", "—", valueX, y, clrWhite, 9);
    y += lineHeight + 15;
-   
+
    //--- MTF Trend Section Header
-   CreatePanelLabel("mtf_hdr", "── MTF TREND ──", labelX, y, C'100,100,120', 9);
+   CreatePanelLabel("mtf_hdr", "-- MTF TREND --", labelX, y, C'100,100,120', 9);
    y += lineHeight;
-   
+
    CreatePanelLabel("tf1_lbl", GetTimeframeName(MTF_TF1) + ":", labelX, y, C'140,140,140', 9);
    CreatePanelLabel("tf1_val", "—", labelX + 45, y, clrGray, 9);
    y += lineHeight;
-   
+
    CreatePanelLabel("tf2_lbl", GetTimeframeName(MTF_TF2) + ":", labelX, y, C'140,140,140', 9);
    CreatePanelLabel("tf2_val", "—", labelX + 45, y, clrGray, 9);
    y += lineHeight;
-   
+
    CreatePanelLabel("tf3_lbl", GetTimeframeName(MTF_TF3) + ":", labelX, y, C'140,140,140', 9);
    CreatePanelLabel("tf3_val", "—", labelX + 45, y, clrGray, 9);
    y += lineHeight + 10;
-   
+
    //--- Alignment display (larger, centered)
    CreatePanelLabel("align_lbl", "Alignment:", labelX, y, C'140,140,140', 9);
    CreatePanelLabel("align_val", "— of 3", valueX, y, clrWhite, 10);
@@ -749,53 +804,53 @@ void UpdateStatsPanel()
    ObjectSetString(0, objPrefix + "panel_buy_val", OBJPROP_TEXT, IntegerToString(validBuySignals));
    ObjectSetString(0, objPrefix + "panel_sell_val", OBJPROP_TEXT, IntegerToString(validSellSignals));
    ObjectSetString(0, objPrefix + "panel_filt_val", OBJPROP_TEXT, IntegerToString(filteredSignals));
-   
+
    int totalValid = validBuySignals + validSellSignals;
    if(totalSignals > 0)
    {
       double passRate = (double)totalValid / totalSignals * 100.0;
       ObjectSetString(0, objPrefix + "panel_rate_val", OBJPROP_TEXT, DoubleToString(passRate, 1) + "%");
    }
-   
+
    //--- Update MTF Trend Display
    if(UseTrendFilter && UseMTFTrend)
    {
       int bullCount = 0, bearCount = 0;
-      
+
       //--- Get current trend for each TF
       string trend1 = GetCurrentTrend(emaHandle_TF1, MTF_TF1);
       string trend2 = GetCurrentTrend(emaHandle_TF2, MTF_TF2);
       string trend3 = GetCurrentTrend(emaHandle_TF3, MTF_TF3);
-      
+
       //--- Update TF1
       color clr1 = (trend1 == "BULL") ? clrLime : (trend1 == "BEAR") ? clrRed : clrGray;
-      string txt1 = (trend1 == "BULL") ? "▲ BULL" : (trend1 == "BEAR") ? "▼ BEAR" : "— N/A";
+      string txt1 = (trend1 == "BULL") ? "BULL" : (trend1 == "BEAR") ? "BEAR" : "— N/A";
       ObjectSetString(0, objPrefix + "panel_tf1_val", OBJPROP_TEXT, txt1);
       ObjectSetInteger(0, objPrefix + "panel_tf1_val", OBJPROP_COLOR, clr1);
       if(trend1 == "BULL") bullCount++;
       else if(trend1 == "BEAR") bearCount++;
-      
+
       //--- Update TF2
       color clr2 = (trend2 == "BULL") ? clrLime : (trend2 == "BEAR") ? clrRed : clrGray;
-      string txt2 = (trend2 == "BULL") ? "▲ BULL" : (trend2 == "BEAR") ? "▼ BEAR" : "— N/A";
+      string txt2 = (trend2 == "BULL") ? "BULL" : (trend2 == "BEAR") ? "BEAR" : "— N/A";
       ObjectSetString(0, objPrefix + "panel_tf2_val", OBJPROP_TEXT, txt2);
       ObjectSetInteger(0, objPrefix + "panel_tf2_val", OBJPROP_COLOR, clr2);
       if(trend2 == "BULL") bullCount++;
       else if(trend2 == "BEAR") bearCount++;
-      
+
       //--- Update TF3
       color clr3 = (trend3 == "BULL") ? clrLime : (trend3 == "BEAR") ? clrRed : clrGray;
-      string txt3 = (trend3 == "BULL") ? "▲ BULL" : (trend3 == "BEAR") ? "▼ BEAR" : "— N/A";
+      string txt3 = (trend3 == "BULL") ? "BULL" : (trend3 == "BEAR") ? "BEAR" : "— N/A";
       ObjectSetString(0, objPrefix + "panel_tf3_val", OBJPROP_TEXT, txt3);
       ObjectSetInteger(0, objPrefix + "panel_tf3_val", OBJPROP_COLOR, clr3);
       if(trend3 == "BULL") bullCount++;
       else if(trend3 == "BEAR") bearCount++;
-      
+
       //--- Update alignment display
       int maxCount = MathMax(bullCount, bearCount);
       string alignText = IntegerToString(maxCount) + " of 3";
       color alignColor = clrGray;
-      
+
       if(maxCount == 3)
          alignColor = (bullCount == 3) ? clrLime : clrRed;
       else if(maxCount == 2)
@@ -804,15 +859,15 @@ void UpdateStatsPanel()
          alignColor = clrOrange;
       else
          alignColor = clrGray;
-      
+
       //--- Add direction indicator
       if(bullCount > bearCount)
-         alignText = IntegerToString(bullCount) + " of 3 ▲";
+         alignText = IntegerToString(bullCount) + " of 3";
       else if(bearCount > bullCount)
-         alignText = IntegerToString(bearCount) + " of 3 ▼";
+         alignText = IntegerToString(bearCount) + " of 3";
       else if(bullCount == bearCount && bullCount > 0)
-         alignText = IntegerToString(bullCount) + " of 3 ↔";
-      
+         alignText = IntegerToString(bullCount) + " of 3";
+
       ObjectSetString(0, objPrefix + "panel_align_val", OBJPROP_TEXT, alignText);
       ObjectSetInteger(0, objPrefix + "panel_align_val", OBJPROP_COLOR, alignColor);
    }
@@ -825,17 +880,17 @@ string GetCurrentTrend(int handle, ENUM_TIMEFRAMES tf)
 {
    if(handle == INVALID_HANDLE)
       return "N/A";
-   
+
    double emaValues[];
    ArraySetAsSeries(emaValues, true);
-   
+
    if(CopyBuffer(handle, 0, 0, 3, emaValues) < 2)
       return "N/A";
-   
+
    double closePrice = iClose(_Symbol, tf, 1);
    if(closePrice <= 0 || emaValues[1] <= 0)
       return "N/A";
-   
+
    if(closePrice > emaValues[1])
       return "BULL";
    else if(closePrice < emaValues[1])
@@ -853,7 +908,7 @@ void DetectInstrumentType()
    string symbolUpper = symbol;
    StringToUpper(symbolUpper);
    int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
-   
+
    if(StringFind(symbolUpper, "XAU") >= 0 || StringFind(symbolUpper, "GOLD") >= 0)
    {
       pipValue = 0.1;
@@ -871,7 +926,8 @@ void DetectInstrumentType()
    }
    else if(digits == 5 || digits == 4)
    {
-      pipValue = (digits == 5) ? 0.0001 : 0.001;
+      //--- Fix #3: 4-digit pairs also use 0.0001 pip value
+      pipValue = 0.0001;
       spreadUnit = "pips";
    }
    else
